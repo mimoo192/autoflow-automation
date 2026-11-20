@@ -1,0 +1,330 @@
+{
+  "name": "Shopify + Etsy → Unified CRM + Review Request",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "created_at",
+              "operation": "after",
+              "value": "{{ $now.minus(5, 'minutes').toISO() }}"
+            }
+          ]
+        }
+      },
+      "id": "1",
+      "name": "Shopify Trigger (New Order)",
+      "type": "n8n-nodes-base.shopifyTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        200
+      ],
+      "webhookId": "shopify-order-webhook",
+      "credentials": {
+        "shopifyApi": "shopify-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://openapi.etsy.com/v3/application/shops/{{$credentials.shopId}}/receipts",
+        "method": "GET",
+        "options": {
+          "queryParameters": {
+            "limit": 25,
+            "was_paid": "true",
+            "created_after": "={{ $now.minus(10, 'minutes').toISO() }}"
+          }
+        },
+        "authentication": "none",
+        "headerParametersJson": "{\n  \"x-api-key\": \"={{ $credentials.apiKey }}\",\n  \"Authorization\": \"Bearer {{ $credentials.accessToken }}\"\n      }"
+      },
+      "id": "2",
+      "name": "Etsy API - Fetch New Orders",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        250,
+        400
+      ],
+      "credentials": {
+        "httpHeaderAuth": "etsy-api-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const shopifyOrders = $node[\"Shopify Trigger (New Order)\"].json;\nconst etsyReceipts = $node[\"Etsy API - Fetch New Orders\"].json.results || [];\n\nconst unified = [];\n\n// Process Shopify orders\nif (shopifyOrders) {\n  shopifyOrders.forEach(order => {\n    unified.push({\n      source: 'shopify',\n      orderId: order.id,\n      orderNumber: order.order_number,\n      customerEmail: order.email,\n      customerName: `${order.billing_address?.first_name || ''} ${order.billing_address?.last_name || ''}`.trim(),\n      customerPhone: order.billing_address?.phone,\n      total: order.total_price,\n      currency: order.currency,\n      lineItems: order.line_items.map(item => ({\n        title: item.title,\n        quantity: item.quantity,\n        price: item.price,\n        sku: item.sku,\n        productType: item.product_type\n      })),\n      createdAt: order.created_at\n    });\n  });\n}\n\n// Process Etsy receipts\netsyReceipts.forEach(receipt => {\n  unified.push({\n    source: 'etsy',\n    orderId: receipt.receipt_id,\n    orderNumber: receipt.receipt_id.toString(),\n    customerEmail: receipt.buyer_email,\n    customerName: receipt.name,\n    customerPhone: null,\n    total: receipt.grandtotal?.amount / 100 || 0,\n    currency: receipt.grandtotal?.currency_code || 'USD',\n    lineItems: receipt.transactions.map(t => ({\n      title: t.title,\n      quantity: t.quantity,\n      price: t.price?.amount / 100 || 0,\n      sku: t.sku,\n      productType: t.is_digital ? 'Digital' : 'Physical'\n    })),\n    createdAt: receipt.creation_tsz ? new Date(receipt.creation_tsz * 1000).toISOString() : new Date().toISOString()\n  });\n});\n\nreturn unified;"
+      },
+      "id": "3",
+      "name": "Unify Orders from Both Platforms",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "resource": "contact",
+        "properties": {
+          "email": "={{$json.customerEmail}}",
+          "firstname": "={{$json.customerName.split(' ')[0]}}",
+          "lastname": "={{$json.customerName.split(' ').slice(1).join(' ') || 'Customer'}}",
+          "phone": "={{$json.customerPhone}}",
+          "lifecyclestage": "customer"
+        },
+        "options": {}
+      },
+      "id": "4",
+      "name": "Create/Update Contact in HubSpot",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [
+        750,
+        200
+      ],
+      "credentials": {
+        "hubspotApi": "hubspot-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "resource": "deal",
+        "properties": {
+          "dealname": "={{$json.source.toUpperCase()} Order #{{$json.orderNumber}}",
+          "amount": "={{$json.total}}",
+          "dealstage": "closedwon",
+          "pipeline": "default",
+          "closedate": "={{$now.toISO().split('T')[0]}}"
+        },
+        "options": {}
+      },
+      "id": "5",
+      "name": "Create Deal in HubSpot",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [
+        750,
+        300
+      ],
+      "credentials": {
+        "hubspotApi": "hubspot-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "resource": "note",
+        "properties": {
+          "hs_timestamp": "={{$now.toISO()}}",
+          "hs_note_body": "={{ `Order from ${$json.source.toUpperCase()} #${$json.orderNumber}\\nTotal: ${$json.total} ${$json.currency}\\nItems: ${$json.lineItems.map(i => `${i.title} x${i.quantity}`).join(', ')}` }}",
+          "hubspot_owner_id": "={{$credentials.ownerId}}"
+        },
+        "options": {}
+      },
+      "id": "6",
+      "name": "Add Order Note to Contact",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [
+        750,
+        400
+      ],
+      "credentials": {
+        "hubspotApi": "hubspot-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const isRepeatCustomer = $json.properties?.hs_analytics_num_visits > 1;\nconst isHighValue = $json.total > 100;\nconst isDigital = $json.lineItems.some(i => i.productType === 'Digital');\n\nreturn [{\n  json: {\n    ...$json,\n    tags: [\n      ...($json.tags || []),\n      ...(isRepeatCustomer ? ['repeat-customer'] : []),\n      ...(isHighValue ? ['high-value'] : []),\n      ...(isDigital ? ['digital-buyer'] : ['physical-buyer'])\n    ],\n    sendReviewRequest: isRepeatCustomer && !isDigital // Physical product repeat buyers get review request\n  }\n}];"
+      },
+      "id": "7",
+      "name": "Enrich Customer Data & Decide Review Request",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.sendReviewRequest}}",
+              "operation": "true"
+            }
+          ]
+        }
+      },
+      "id": "8",
+      "name": "Should Send Review Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "reviews@yourstore.com",
+        "toEmail": "={{$json.customerEmail}}",
+        "subject": "How was your order #{{$json.orderNumber}}?",
+        "text": "Hi {{$json.customerName.split(' ')[0]}},\n\nYou recently ordered from our {{ $json.source }} store. We'd love to hear how it went!\n\nLeave a quick review: {{ $json.source === 'shopify' ? 'https://yourstore.com/reviews' : 'https://etsy.com/shop/yourshop/reviews' }}\n\nIt takes 30 seconds and helps us immensely.\n\nThanks!\nThe Team",
+        "html": "<p>Hi {{$json.customerName.split(' ')[0]}},</p><p>You recently ordered from our {{ $json.source }} store. We'd love to hear how it went!</p><p><a href=\"{{ $json.source === 'shopify' ? 'https://yourstore.com/reviews' : 'https://etsy.com/shop/yourshop/reviews' }}\">Leave a review</a></p><p>It takes 30 seconds and helps us immensely.</p><p>Thanks!<br>The Team</p>"
+      },
+      "id": "9",
+      "name": "Send Review Request Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        200
+      ],
+      "credentials": {
+        "gmailOAuth2Api": "gmail-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "console.log('Unified CRM sync complete for:', $json.orderNumber);\nreturn [{ json: { success: true, orderNumber: $json.orderNumber, source: $json.source, reviewSent: $json.sendReviewRequest } }];"
+      },
+      "id": "10",
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Shopify Trigger (New Order)": {
+      "main": [
+        [
+          {
+            "node": "Unify Orders from Both Platforms",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Etsy API - Fetch New Orders": {
+      "main": [
+        [
+          {
+            "node": "Unify Orders from Both Platforms",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unify Orders from Both Platforms": {
+      "main": [
+        [
+          {
+            "node": "Create/Update Contact in HubSpot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create/Update Contact in HubSpot": {
+      "main": [
+        [
+          {
+            "node": "Create Deal in HubSpot",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Add Order Note to Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Deal in HubSpot": {
+      "main": [
+        [
+          {
+            "node": "Enrich Customer Data & Decide Review Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add Order Note to Contact": {
+      "main": [
+        [
+          {
+            "node": "Enrich Customer Data & Decide Review Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich Customer Data & Decide Review Request": {
+      "main": [
+        [
+          {
+            "node": "Should Send Review Request?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Send Review Request?": {
+      "main": [
+        [
+          {
+            "node": "Send Review Request Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Completion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Review Request Email": {
+      "main": [
+        [
+          {
+            "node": "Log Completion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "shopify-etsy-unified-crm"
+  },
+  "id": "shopify-etsy-unified-crm"
+}

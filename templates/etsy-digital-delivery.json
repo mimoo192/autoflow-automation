@@ -1,0 +1,172 @@
+{
+  "name": "Etsy Order → Digital Product Delivery",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "https://openapi.etsy.com/v3/application/shops/{{$credentials.shopId}}/receipts",
+        "method": "GET",
+        "options": {
+          "queryParameters": {
+            "limit": 25,
+            "was_paid": "true",
+            "created_after": "={{ $now.minus(10, 'minutes').toISO() }}"
+          }
+        },
+        "authentication": "none",
+        "headerParametersJson": "{\n  \"x-api-key\": \"={{ $credentials.apiKey }}\",\n  \"Authorization\": \"Bearer {{ $credentials.accessToken }}\"\n      }"
+      },
+      "id": "1",
+      "name": "Etsy API - Fetch New Orders",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        250,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": "etsy-api-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const receipts = $json.results || [];\nconst digitalReceipts = receipts.filter(receipt => \n  receipt.transactions.some(t => \n    t.is_digital === true || t.digital_file_id !== null\n  )\n);\n\nreturn digitalReceipts.map(receipt => ({\n  receiptId: receipt.receipt_id,\n  buyerEmail: receipt.buyer_email,\n  buyerName: receipt.name,\n  transactions: receipt.transactions\n    .filter(t => t.is_digital === true || t.digital_file_id !== null)\n    .map(t => ({\n      listingId: t.listing_id,\n      title: t.title,\n      quantity: t.quantity,\n      price: t.price.amount / 100,\n      digitalFileId: t.digital_file_id\n    }))\n}));"
+      },
+      "id": "2",
+      "name": "Filter Digital Transactions",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://openapi.etsy.com/v3/application/listings/{{$json.listingId}}/digital-files/{{$json.digitalFileId}}",
+        "method": "GET",
+        "options": {},
+        "authentication": "none",
+        "headerParametersJson": "{\n  \"x-api-key\": \"={{ $credentials.apiKey }}\",\n  \"Authorization\": \"Bearer {{ $credentials.accessToken }}\"\n      }"
+      },
+      "id": "3",
+      "name": "Get Digital File URL from Etsy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        750,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": "etsy-api-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "noreply@yourshop.com",
+        "toEmail": "={{$json.buyerEmail}}",
+        "subject": "Your Etsy Digital Download: {{$json.title}}",
+        "text": "Hi {{$json.buyerName}},\n\nThanks for your purchase from our Etsy shop!\n\nYour digital file **{{$json.title}}** is ready.\n\nDownload: {{$node[\"Get Digital File URL from Etsy\"].json.download_url}}\n\nThis link expires in 7 days. Contact us if you need help!\n\nThanks,\nThe Shop Team",
+        "html": "<p>Hi {{$json.buyerName}},</p><p>Thanks for your purchase from our Etsy shop!</p><p>Your digital file <strong>{{$json.title}}</strong> is ready.</p><p><a href=\"{{$node[\"Get Digital File URL from Etsy\"].json.download_url}}\">Download your file</a></p><p>This link expires in 7 days. Contact us if you need help!</p><p>Thanks,<br>The Shop Team</p>"
+      },
+      "id": "4",
+      "name": "Send Delivery Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        200
+      ],
+      "credentials": {
+        "gmailOAuth2Api": "gmail-credentials"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "console.log('Etsy order fulfilled:', $json.receiptId);\nreturn [{ json: { success: true, receiptId: $json.receiptId, delivered: true } }];"
+      },
+      "id": "5",
+      "name": "Log Success",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const error = $json.error;\nconsole.error('Etsy delivery failed:', error);\nreturn [{ json: { success: false, error: error.message, receiptId: $json.receiptId } }];"
+      },
+      "id": "6",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Etsy API - Fetch New Orders": {
+      "main": [
+        [
+          {
+            "node": "Filter Digital Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Digital Transactions": {
+      "main": [
+        [
+          {
+            "node": "Get Digital File URL from Etsy",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Digital File URL from Etsy": {
+      "main": [
+        [
+          {
+            "node": "Send Delivery Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Delivery Email": {
+      "main": [
+        [
+          {
+            "node": "Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "etsy-digital-delivery"
+  },
+  "id": "etsy-digital-delivery"
+}
