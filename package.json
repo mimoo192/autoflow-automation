@@ -1,0 +1,43 @@
+{
+  "name": "autoflow-n8n-templates",
+  "version": "1.0.0",
+  "description": "Production-ready n8n workflow templates for Shopify and Etsy digital product automation",
+  "main": "templates/README.md",
+  "scripts": {
+    "verify": "node scripts/verify-templates.js",
+    "start": "npx serve public -l 3000",
+    "build": "node scripts/build-static.js",
+    "lint": "eslint . --ext .js,.json",
+    "test": "node scripts/verify-templates.js"
+  },
+  "keywords": [
+    "n8n",
+    "automation",
+    "shopify",
+    "etsy",
+    "digital-products",
+    "workflow",
+    "crm",
+    "hubspot",
+    "no-code",
+    "resell-rights",
+    "ecommerce"
+  ],
+  "author": "yassineti140@gmail.com",
+  "license": "ISC",
+  "files": [
+    "templates/",
+    "docs/",
+    "README.md",
+    "public/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mimoo192/autoflow-automation.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {},
+  "peerDependencies": {}
+}
